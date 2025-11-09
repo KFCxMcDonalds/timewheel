@@ -7,10 +7,7 @@ import (
 
 	"github.com/KFCxMcDonalds/timewheel/delayqueue"
 	"github.com/panjf2000/ants/v2"
-
 )
-
-var POOL_SIZE = 1000
 
 type TimeWheel struct {
 	currentTime atomic.Int64 // ms
@@ -28,13 +25,13 @@ type TimeWheel struct {
 	exitCh chan struct{}
 }
 
-func New(tick time.Duration, wheelSize int64) *TimeWheel {
+func New(tick time.Duration, wheelSize int64, poolSize int) *TimeWheel {
 	tickMS := int64(tick / time.Millisecond)
 	if tickMS <= 0 || wheelSize <= 0 {
 		panic("tick span must be >= 1ms and wheelSize must be > 0")
 	}
 	startMS := time2MS(time.Now())
-	pool , _:= ants.NewPool(POOL_SIZE, ants.WithNonblocking(true)) // if goroutine pool is full, degraded to goroutine
+	pool , _:= ants.NewPool(poolSize, ants.WithNonblocking(true)) // if goroutine pool is full, degraded to goroutine
 	return new(startMS, tickMS, wheelSize, delayqueue.New(int(wheelSize)), pool)
 }
 
