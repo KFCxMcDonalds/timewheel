@@ -76,8 +76,8 @@ import (
 )
 
 func main() {
-    // 创建时间轮: tick=1ms, wheelSize=60
-    tw := timewheel.New(1*time.Millisecond, 60)
+    // 创建时间轮: tick=1ms, wheelSize=60, poolSize=1000
+    tw := timewheel.New(1*time.Millisecond, 60, 1000)
     tw.Start()
     defer tw.Stop()
 
