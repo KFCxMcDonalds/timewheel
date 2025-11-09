@@ -8,7 +8,7 @@ import (
 )
 
 func TestTimeWheel_Start(t *testing.T) {
-	tw := timewheel.New(1*time.Millisecond,60)
+	tw := timewheel.New(1*time.Millisecond,60, 1000)
 	tw.Start()
 	defer tw.Stop()
 
