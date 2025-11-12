@@ -11,45 +11,68 @@ import (
 
 type TimeWheel struct {
 	currentTime atomic.Int64 // ms
-	tick     int64 // ms, tick time span
-	wheelSize int64 // number of slots
-	interval int64 // ms, circle time, interval = tick * wheelSize 
+	tick        int64        // ms, tick time span
+	wheelSize   int64        // number of slots
+	interval    int64        // ms, circle time, interval = tick * wheelSize
 
-	buckets []*Bucket             // bucket list, each bucket contains a bi-directional linked list of tasks
-	queue *delayqueue.DelayQueue // priority queue for slots
+	buckets []*Bucket              // bucket list, each bucket contains a bi-directional linked list of tasks
+	queue   *delayqueue.DelayQueue // priority queue for slots
 
 	overflowTW atomic.Pointer[TimeWheel] // contain tasks that exceed current time wheel's range
 
-	wg sync.WaitGroup
-	pool *ants.Pool
+	wg     sync.WaitGroup
+	poolSize int
+	pool   *ants.Pool
 	exitCh chan struct{}
+
+	panicHanlder func(any)
+	logger 	 Logger
 }
 
-func New(tick time.Duration, wheelSize int64, poolSize int) *TimeWheel {
+func New(tick time.Duration, wheelSize int64, opts...Option) *TimeWheel {
 	tickMS := int64(tick / time.Millisecond)
 	if tickMS <= 0 || wheelSize <= 0 {
 		panic("tick span must be >= 1ms and wheelSize must be > 0")
 	}
 	startMS := time2MS(time.Now())
-	pool , _:= ants.NewPool(poolSize, ants.WithNonblocking(true)) // if goroutine pool is full, degraded to goroutine
-	return new(startMS, tickMS, wheelSize, delayqueue.New(int(wheelSize)), pool)
+
+	// create time wheel instance
+	tw := new(startMS, tickMS, wheelSize)
+
+	// apply options
+	defaultOpts := DefaultOptions()
+	for _, opt := range defaultOpts {
+		opt(tw)
+	}
+	for _, opt := range opts {
+		opt(tw)
+	}
+	
+	// initializations
+	tw.queue = delayqueue.New(int(tw.wheelSize))
+	tw.exitCh = make(chan struct{})
+	// ants pool with option
+	pool, _ := ants.NewPool(tw.poolSize, 
+		ants.WithNonblocking(true), // if goroutine pool is full, degraded to goroutine
+		ants.WithPanicHandler(tw.panicHanlder),
+	)
+	tw.pool = pool
+
+	return tw
 }
 
-func new(startMS, tickMS, wheelSize int64, queue *delayqueue.DelayQueue, pool *ants.Pool) *TimeWheel {
+func new(startMS, tickMS, wheelSize int64) *TimeWheel {
 	// initialize slots
 	buckets := make([]*Bucket, wheelSize)
 	for i := range buckets {
 		buckets[i] = newBucket()
 	}
-	tw :=  &TimeWheel {
+	tw := &TimeWheel{
 		currentTime: atomic.Int64{},
-		tick: tickMS,
-		wheelSize: wheelSize,
-		interval: tickMS * wheelSize,
-		buckets: buckets,
-		queue: queue,
-		pool: pool,
-		exitCh: make(chan struct{}),
+		tick:        tickMS,
+		wheelSize:   wheelSize,
+		interval:    tickMS * wheelSize,
+		buckets:     buckets,
 	}
 	tw.currentTime.Store(truncate(startMS, tickMS))
 	return tw
@@ -61,7 +84,7 @@ func (tw *TimeWheel) Start() {
 	tw.wg.Add(1)
 	go func() {
 		defer tw.wg.Done()
-		tw.queue.Poll(tw.exitCh, func()int64{
+		tw.queue.Poll(tw.exitCh, func() int64 {
 			return time2MS(time.Now())
 		})
 	}()
@@ -72,13 +95,13 @@ func (tw *TimeWheel) Start() {
 		defer tw.wg.Done()
 		for {
 			select {
-			case item := <- tw.queue.C:
-			    b := item.(*Bucket)
-			    // advance time wheel clock
+			case item := <-tw.queue.C:
+				b := item.(*Bucket)
+				// advance time wheel clock
 				tw.advanceClock(b.expiration.Load())
 				// flush bucket's tasks
 				b.Flush(tw.addOrRun)
-			case <- tw.exitCh:
+			case <-tw.exitCh:
 				return
 			}
 		}
@@ -92,9 +115,10 @@ func (tw *TimeWheel) Stop() {
 }
 
 func (tw *TimeWheel) PlaceTimer(after time.Duration, run func()) {
+	expire := time2MS(time.Now().Add(after))
 	timer := &Timer{
-		expiration: time2MS(time.Now().Add(after)),
-		run:      run,
+		expiration: expire,
+		run:        run,
 	}
 	tw.addOrRun(timer)
 }
@@ -103,8 +127,9 @@ func (tw *TimeWheel) addOrRun(timer *Timer) {
 	// if expireAt < now, run immediately
 	// INFO: maybe need rethink
 	if timer.expiration < tw.currentTime.Load()+tw.tick {
+		safeRun := tw.wrapRecover(timer.run)
 		if tw.pool.Submit(timer.run) != nil {
-			go timer.run()
+			go safeRun()
 		}
 		return
 	}
@@ -117,18 +142,18 @@ func (tw *TimeWheel) add(timer *Timer) {
 	if timer.expiration < tw.currentTime.Load()+tw.interval {
 		// calculate bucket index
 		virtualID := timer.expiration / tw.tick
-		bucketInd := virtualID % tw.wheelSize    // abusolute bucket index in current time wheel
+		bucketInd := virtualID % tw.wheelSize // abusolute bucket index in current time wheel
 		// if index exists, add task into bucket (reuse bucket)
 		b := tw.buckets[bucketInd]
 		b.AddTimer(timer)
-		
+
 		// bucket expiration time is aligned with interval
-		if b.SetExpiration(virtualID * tw.tick){
+		if b.SetExpiration(virtualID * tw.tick) {
 			// bucket which has been reused into delay queue
 			expiration := b.expiration.Load()
 			tw.queue.Enqueue(b, expiration)
 		}
-	// else recursively add into overflow time wheel
+		// else recursively add into overflow time wheel
 	} else {
 		overflowTW := tw.getOrCreateOverflowTW()
 		// recursively add timer into overflowTW
@@ -141,7 +166,10 @@ func (tw *TimeWheel) getOrCreateOverflowTW() *TimeWheel {
 		return wheel
 	}
 	// create new overflow time wheel
-	newTW := new(tw.currentTime.Load(), tw.interval, tw.wheelSize, tw.queue, tw.pool)
+	newTW := new(tw.currentTime.Load(), tw.interval, tw.wheelSize)
+	// inherit options from parent time wheelSize
+	inheritOptions(newTW, tw)
+
 	if tw.overflowTW.CompareAndSwap(nil, newTW) {
 		// create successfully, return new wheel
 		return newTW
@@ -164,3 +192,15 @@ func (tw *TimeWheel) advanceClock(expiration int64) {
 		}
 	}
 }
+
+func (tw *TimeWheel) wrapRecover(fn func()) func() {
+	return func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tw.panicHanlder(r)
+			}
+		}()
+		fn()
+	}
+}
+

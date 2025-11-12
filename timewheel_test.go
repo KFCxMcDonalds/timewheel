@@ -1,6 +1,8 @@
 package timewheel_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -8,7 +10,7 @@ import (
 )
 
 func TestTimeWheel_Start(t *testing.T) {
-	tw := timewheel.New(1*time.Millisecond,60, 1000)
+	tw := timewheel.New(1*time.Millisecond,60)
 	tw.Start()
 	defer tw.Stop()
 
@@ -22,7 +24,7 @@ func TestTimeWheel_Start(t *testing.T) {
 	}
 
 	for _, d := range durations {
-		t.Run("", func(t *testing.T){
+		t.Run("Timewheel_PlaceTimer", func(t *testing.T){
 			start := time.Now()
 			timeC := make(chan time.Time)
 
@@ -39,4 +41,30 @@ func TestTimeWheel_Start(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTimeWheel_Panic(t *testing.T) {
+	panicMsg := ""
+	handler := func(p any) {
+		panicMsg = fmt.Sprintf("%v", p)
+	}
+	tw := timewheel.New(1*time.Millisecond,60,
+		timewheel.WithPanicHandler(handler),
+	)
+	tw.Start()
+	defer tw.Stop()
+
+	t.Run("Timewheel_PanicRecovery", func(t *testing.T){
+		tw.PlaceTimer(10*time.Millisecond, func(){
+			panic("test panic")
+		})
+
+		time.Sleep(50 * time.Millisecond) // wait for the timer to execute
+
+		if !strings.Contains(panicMsg, "test panic") {
+			t.Errorf("Panic handler was not called correctly, got: %s", panicMsg)
+		}
+
+	})
+
 }

@@ -11,6 +11,13 @@
 - **内存优化**: 优先队列根据任务数量动态扩缩容,减少内存占用
 - **协程池**: 集成 ants 协程池并发执行任务,池满时降级为独立 goroutine 保证零丢失
 - **并发安全**: 时钟推进采用原子操作,数据结构使用细粒度锁,高并发下无竞争
+- **灵活配置**: 支持函数选项模式自定义协程池大小、日志器和 panic 处理器
+
+## TODO
+- [x] 增加降级处理的Panic handler -> log
+- [x] 支持自定义panic处理函数
+- [x] 支持自定义logger
+
 
 ## 详细特性
 
@@ -34,9 +41,10 @@
 
 ### 4. 协程池优化
 
-- **集成 ants 协程池**: 默认 1000 并发容量执行定时任务 (`timewheel.go:13`)
-- **自动降级**: 协程池满时自动降级为普通 goroutine,保证任务不丢失 (`timewheel.go:37`)
+- **集成 ants 协程池**: 默认 1000 并发容量执行定时任务,可通过 `WithPoolSize()` 自定义
+- **自动降级**: 协程池满时自动降级为普通 goroutine,保证任务不丢失
 - **非阻塞模式**: 使用 `WithNonblocking(true)` 避免任务提交阻塞
+- **Panic 保护**: 任务 panic 会被自动捕获,通过自定义 PanicHandler 处理
 
 ### 5. 并发安全设计
 
@@ -66,6 +74,8 @@
 
 ## 使用示例
 
+### 基础用法
+
 ```go
 package main
 
@@ -76,8 +86,8 @@ import (
 )
 
 func main() {
-    // 创建时间轮: tick=1ms, wheelSize=60, poolSize=1000
-    tw := timewheel.New(1*time.Millisecond, 60, 1000)
+    // 创建时间轮: tick=1ms, wheelSize=60 (使用默认配置)
+    tw := timewheel.New(1*time.Millisecond, 60)
     tw.Start()
     defer tw.Stop()
 
@@ -91,6 +101,70 @@ func main() {
     })
 
     time.Sleep(2 * time.Second)
+}
+```
+
+### 自定义配置
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "time"
+    "github.com/KFCxMcDonalds/timewheel"
+    "github.com/sirupsen/logrus"
+)
+
+func main() {
+    // 自定义 Logger
+    logger := logrus.New()
+    logger.SetLevel(logrus.InfoLevel)
+
+    // 使用函数选项模式配置时间轮
+    tw := timewheel.New(
+        1*time.Millisecond,
+        60,
+        timewheel.WithPoolSize(500),              // 自定义协程池大小
+        timewheel.WithLogger(logger),             // 自定义日志器
+        timewheel.WithPanicHandler(func(p any) {  // 自定义 panic 处理
+            log.Printf("Task panicked: %v", p)
+            // 可以发送告警、上报监控等
+        }),
+    )
+    tw.Start()
+    defer tw.Stop()
+
+    // 添加可能 panic 的任务
+    tw.PlaceTimer(100*time.Millisecond, func() {
+        panic("something went wrong")
+    })
+
+    time.Sleep(1 * time.Second)
+}
+```
+
+## 配置选项
+
+TimeWheel 支持以下配置选项（采用函数选项模式）：
+
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `WithPoolSize(size int)` | 设置协程池大小 | 1000 |
+| `WithLogger(logger Logger)` | 设置自定义日志器（需实现 Logger 接口） | logrus.New() |
+| `WithPanicHandler(handler func(any))` | 设置任务 panic 时的处理函数 | logrus.Errorf |
+
+### Logger 接口
+
+如果需要自定义日志器，需实现以下接口：
+
+```go
+type Logger interface {
+    Debugf(format string, args ...any)
+    Infof(format string, args ...any)
+    Warnf(format string, args ...any)
+    Errorf(format string, args ...any)
 }
 ```
 
@@ -132,6 +206,7 @@ func main() {
 ## 依赖
 
 - `github.com/panjf2000/ants/v2` - 协程池
+- `github.com/sirupsen/logrus` - 默认日志库（可替换）
 - Go 1.23.6+
 
 ## 测试
