@@ -114,8 +114,21 @@ func (tw *TimeWheel) Stop() {
 	tw.pool.Release()
 }
 
-func (tw *TimeWheel) PlaceTimer(after time.Duration, run func()) {
+// PlaceTimerAfter schedules a task to run after the specified duration.
+// The task will be executed approximately after the given duration from now.
+func (tw *TimeWheel) PlaceTimerAfter(after time.Duration, run func()) {
 	expire := time2ms(time.Now().Add(after))
+	timer := &Timer{
+		expiration: expire,
+		run:        run,
+	}
+	tw.addOrRun(timer)
+}
+
+// PlaceTimerAt schedules a task to run at the specified absolute time.
+// If the specified time is in the past or within the next tick, the task will be executed immediately.
+func (tw *TimeWheel) PlaceTimerAt(at time.Time, run func()) {
+	expire := time2ms(at)
 	timer := &Timer{
 		expiration: expire,
 		run:        run,

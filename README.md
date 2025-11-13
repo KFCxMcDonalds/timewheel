@@ -72,6 +72,19 @@
 
 ## 使用示例
 
+### 添加任务的两种方式
+
+TimeWheel 提供两种方式来添加定时任务：
+
+1. **`PlaceTimerAfter(after time.Duration, run func())`**：基于相对延迟时间
+   - 适用场景：需要在当前时刻之后一段时间执行任务
+   - 例如：100ms 后执行、1 小时后执行
+
+2. **`PlaceTimerAt(at time.Time, run func())`**：基于绝对时间
+   - 适用场景：需要在具体的某个时刻执行任务
+   - 例如：在今天 18:00 执行、在某个特定的 Unix 时间戳执行
+   - 注意：如果指定的时间已经过去或在下一个 tick 内，任务会立即执行
+
 ### 基础用法
 
 ```go
@@ -89,13 +102,62 @@ func main() {
     tw.Start()
     defer tw.Stop()
 
-    // 添加定时任务
-    tw.PlaceTimer(100*time.Millisecond, func() {
+    // 方式 1: 基于延迟时间添加任务
+    tw.PlaceTimerAfter(100*time.Millisecond, func() {
         fmt.Println("Task executed after 100ms")
     })
 
-    tw.PlaceTimer(1*time.Second, func() {
+    tw.PlaceTimerAfter(1*time.Second, func() {
         fmt.Println("Task executed after 1s")
+    })
+
+    // 方式 2: 基于绝对时间添加任务
+    targetTime := time.Now().Add(500 * time.Millisecond)
+    tw.PlaceTimerAt(targetTime, func() {
+        fmt.Println("Task executed at", targetTime)
+    })
+
+    time.Sleep(2 * time.Second)
+}
+```
+
+### 使用 PlaceTimerAt 的实际场景
+
+```go
+package main
+
+import (
+    "fmt"
+    "time"
+    "github.com/KFCxMcDonalds/timewheel"
+)
+
+func main() {
+    tw := timewheel.New(1*time.Millisecond, 60)
+    tw.Start()
+    defer tw.Stop()
+
+    // 场景 1: 在今天的特定时刻执行任务
+    now := time.Now()
+    todayAt18 := time.Date(now.Year(), now.Month(), now.Day(), 18, 0, 0, 0, now.Location())
+    tw.PlaceTimerAt(todayAt18, func() {
+        fmt.Println("Daily report generated at 18:00")
+    })
+
+    // 场景 2: 在 Unix 时间戳执行任务
+    targetTimestamp := time.Unix(1735660800, 0) // 某个特定时间戳
+    tw.PlaceTimerAt(targetTimestamp, func() {
+        fmt.Println("Event triggered at specific timestamp")
+    })
+
+    // 场景 3: 使用 CurrentTime 获取时间轮的当前时刻
+    currentTime := tw.CurrentTime()
+    fmt.Printf("TimeWheel current time: %v\n", currentTime)
+
+    // 场景 4: 检查任务是否会立即执行
+    pastTime := time.Now().Add(-1 * time.Hour)
+    tw.PlaceTimerAt(pastTime, func() {
+        fmt.Println("This task executes immediately because time is in the past")
     })
 
     time.Sleep(2 * time.Second)
@@ -135,7 +197,7 @@ func main() {
     defer tw.Stop()
 
     // 添加可能 panic 的任务
-    tw.PlaceTimer(100*time.Millisecond, func() {
+    tw.PlaceTimerAfter(100*time.Millisecond, func() {
         panic("something went wrong")
     })
 
@@ -176,6 +238,53 @@ type Logger interface {
 - **可选**: 所有选项都有合理的默认值，可以不提供任何选项
 - **继承性**: 溢出时间轮会自动继承父轮的配置（logger、panic handler、协程池）
 - **线程安全**: 选项应用发生在创建阶段，运行时不可修改
+
+## API 参考
+
+### 核心方法
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `New` | `New(tick time.Duration, wheelSize int64, opts...Option) *TimeWheel` | 创建时间轮实例 |
+| `Start` | `Start()` | 启动时间轮 |
+| `Stop` | `Stop()` | 停止时间轮，等待所有任务完成 |
+| `PlaceTimerAfter` | `PlaceTimerAfter(after time.Duration, run func())` | 基于相对延迟添加任务 |
+| `PlaceTimerAt` | `PlaceTimerAt(at time.Time, run func())` | 基于绝对时间添加任务 |
+| `CurrentTime` | `CurrentTime() time.Time` | 获取时间轮的当前逻辑时钟（time.Time 格式） |
+| `CurrentTimeMS` | `CurrentTimeMS() int64` | 获取时间轮的当前逻辑时钟（毫秒时间戳） |
+
+### 方法详解
+
+#### PlaceTimerAfter vs PlaceTimerAt
+
+```go
+// PlaceTimerAfter: 相对时间，从现在开始计算延迟
+tw.PlaceTimerAfter(5*time.Minute, func() {
+    fmt.Println("5 minutes from now")
+})
+
+// PlaceTimerAt: 绝对时间，在指定的时刻执行
+targetTime := time.Date(2025, 12, 31, 23, 59, 59, 0, time.Local)
+tw.PlaceTimerAt(targetTime, func() {
+    fmt.Println("Happy New Year!")
+})
+```
+
+#### CurrentTime 方法
+
+`CurrentTime()` 返回时间轮的逻辑时钟，这个值以 tick 为单位推进，与系统时间略有不同：
+
+```go
+// 获取时间轮当前时刻
+currentTime := tw.CurrentTime()
+fmt.Printf("TimeWheel is at: %v\n", currentTime)
+
+// 或者获取毫秒时间戳
+currentMS := tw.CurrentTimeMS()
+fmt.Printf("TimeWheel is at: %d ms\n", currentMS)
+```
+
+**注意**：`CurrentTime()` 返回的是时间轮的逻辑时钟，它会滞后于 `time.Now()`，因为它只在 bucket 到期时才推进。
 
 ## 技术实现细节
 
