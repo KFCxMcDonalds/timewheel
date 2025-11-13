@@ -34,7 +34,7 @@ func New(tick time.Duration, wheelSize int64, opts...Option) *TimeWheel {
 	if tickMS <= 0 || wheelSize <= 0 {
 		panic("tick span must be >= 1ms and wheelSize must be > 0")
 	}
-	startMS := time2MS(time.Now())
+	startMS := time2ms(time.Now())
 
 	// create time wheel instance
 	tw := new(startMS, tickMS, wheelSize)
@@ -85,7 +85,7 @@ func (tw *TimeWheel) Start() {
 	go func() {
 		defer tw.wg.Done()
 		tw.queue.Poll(tw.exitCh, func() int64 {
-			return time2MS(time.Now())
+			return time2ms(time.Now())
 		})
 	}()
 
@@ -115,7 +115,7 @@ func (tw *TimeWheel) Stop() {
 }
 
 func (tw *TimeWheel) PlaceTimer(after time.Duration, run func()) {
-	expire := time2MS(time.Now().Add(after))
+	expire := time2ms(time.Now().Add(after))
 	timer := &Timer{
 		expiration: expire,
 		run:        run,
@@ -124,8 +124,7 @@ func (tw *TimeWheel) PlaceTimer(after time.Duration, run func()) {
 }
 
 func (tw *TimeWheel) addOrRun(timer *Timer) {
-	// if expireAt < now, run immediately
-	// INFO: maybe need rethink
+	// if expireAt < now+interval, run immediately
 	if timer.expiration < tw.currentTime.Load()+tw.tick {
 		safeRun := tw.wrapRecover(timer.run)
 		if tw.pool.Submit(timer.run) != nil {
@@ -204,3 +203,10 @@ func (tw *TimeWheel) wrapRecover(fn func()) func() {
 	}
 }
 
+func (tw *TimeWheel) CurrentTime() time.Time {
+	return ms2time(tw.currentTime.Load())
+}
+
+func (tw *TimeWheel) CurrentTimeMS() int64 {
+	return tw.currentTime.Load()
+}

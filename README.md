@@ -13,19 +13,14 @@
 - **并发安全**: 时钟推进采用原子操作,数据结构使用细粒度锁,高并发下无竞争
 - **灵活配置**: 支持函数选项模式自定义协程池大小、日志器和 panic 处理器
 
-## TODO
-- [x] 增加降级处理的Panic handler -> log
-- [x] 支持自定义panic处理函数
-- [x] 支持自定义logger
-
-
 ## 详细特性
 
 ### 1. 分层时间轮架构
 
-- **层级溢出设计**: 当定时任务超出当前时间轮范围时,自动创建上层时间轮 (`timewheel.go:136-139`)
-- **无锁溢出轮访问**: 使用原子指针(`atomic.Pointer`)实现高效的溢出轮管理 (`timewheel.go:24`)
-- **级联触发**: 上层时间轮到期后,任务自动下沉到下层时间轮重新调度
+- **层级溢出设计**: 当定时任务超出当前时间轮范围时,自动创建上层时间轮 (`timewheel.go:157-161`)
+- **无锁溢出轮访问**: 使用原子指针(`atomic.Pointer`)实现高效的溢出轮管理 (`timewheel.go:21`)
+- **级联触发**: 上层时间轮到期后,任务自动下沉到下层时间轮重新调度 (`timewheel.go:188-192`)
+- **配置继承**: 溢出轮继承父轮的协程池、日志器和 panic 处理器 (`timewheel.go:171`)
 
 ### 2. 高效的时间管理
 
@@ -41,22 +36,24 @@
 
 ### 4. 协程池优化
 
-- **集成 ants 协程池**: 默认 1000 并发容量执行定时任务,可通过 `WithPoolSize()` 自定义
-- **自动降级**: 协程池满时自动降级为普通 goroutine,保证任务不丢失
-- **非阻塞模式**: 使用 `WithNonblocking(true)` 避免任务提交阻塞
-- **Panic 保护**: 任务 panic 会被自动捕获,通过自定义 PanicHandler 处理
+- **集成 ants 协程池**: 默认 1000 并发容量执行定时任务,可通过 `WithPoolSize()` 自定义 (`timewheel.go:54-59`)
+- **自动降级**: 协程池满时自动降级为普通 goroutine,保证任务不丢失 (`timewheel.go:131`)
+- **非阻塞模式**: 使用 `WithNonblocking(true)` 避免任务提交阻塞 (`timewheel.go:56`)
+- **Panic 保护**: 任务 panic 会被自动捕获,通过自定义 PanicHandler 处理 (`timewheel.go:57`, `option.go:23-26`)
 
 ### 5. 并发安全设计
 
-- **无锁时钟**: 使用 `atomic.Int64` 实现无锁的时间推进 (`timewheel.go:156-169`)
+- **无锁时钟**: 使用 `atomic.Int64` 实现无锁的时间推进 (`timewheel.go:181-194`)
+- **无锁溢出轮**: 使用 `atomic.Pointer[TimeWheel]` 实现并发安全的溢出轮创建 (`timewheel.go:164-179`)
 - **细粒度锁**: bucket 操作仅在必要时加锁,减少锁竞争 (`bucket.go:32-36`)
 - **延迟队列保护**: DelayQueue 使用 mutex 保护优先队列的并发访问 (`delayqueue.go:16-17`)
 
 ### 6. 智能任务调度
 
-- **即时执行**: 已过期任务直接执行,不进入时间轮 (`timewheel.go:108-112`)
-- **分层插入**: 根据过期时间自动选择合适层级的时间轮 (`timewheel.go:118-140`)
+- **即时执行**: 已过期任务直接执行,不进入时间轮 (`timewheel.go:126-134`)
+- **分层插入**: 根据过期时间自动选择合适层级的时间轮 (`timewheel.go:140-162`)
 - **递归调度**: 任务在层级间递归插入,直到找到合适的槽位
+- **Panic 恢复**: 所有任务执行都包裹在 recover 中,支持自定义 panic 处理器 (`timewheel.go:196-205`)
 
 ### 7. 内存优化
 
@@ -67,10 +64,11 @@
 ### 8. 优雅的生命周期管理
 
 - **双 goroutine 设计**:
-  - Goroutine 1: 轮询延迟队列,推送到期的 bucket (`timewheel.go:64-70`)
-  - Goroutine 2: 处理到期任务,推进时钟 (`timewheel.go:73-88`)
-- **WaitGroup 同步**: 保证优雅关闭,等待所有 goroutine 退出 (`timewheel.go:91-95`)
+  - Goroutine 1: 轮询延迟队列,推送到期的 bucket (`timewheel.go:84-90`)
+  - Goroutine 2: 处理到期任务,推进时钟 (`timewheel.go:93-109`)
+- **WaitGroup 同步**: 保证优雅关闭,等待所有 goroutine 退出 (`timewheel.go:111-115`)
 - **协程池回收**: Stop 时自动释放协程池资源
+- **配置继承**: 溢出时间轮自动继承父轮的 logger、panic 处理器和协程池 (`option.go:35-41`)
 
 ## 使用示例
 
@@ -147,13 +145,15 @@ func main() {
 
 ## 配置选项
 
-TimeWheel 支持以下配置选项（采用函数选项模式）：
+TimeWheel 采用**函数选项模式** (Functional Options Pattern) 进行配置，提供灵活且向后兼容的配置方式。
 
-| 选项 | 说明 | 默认值 |
-|------|------|--------|
-| `WithPoolSize(size int)` | 设置协程池大小 | 1000 |
-| `WithLogger(logger Logger)` | 设置自定义日志器（需实现 Logger 接口） | logrus.New() |
-| `WithPanicHandler(handler func(any))` | 设置任务 panic 时的处理函数 | logrus.Errorf |
+### 可用选项
+
+| 选项 | 说明 | 默认值 | 示例 |
+|------|------|--------|------|
+| `WithPoolSize(size int)` | 设置协程池大小，控制并发执行任务的最大 goroutine 数量 | 1000 | `WithPoolSize(500)` |
+| `WithLogger(logger Logger)` | 设置自定义日志器（需实现 Logger 接口），用于记录内部日志 | logrus.New() | `WithLogger(myLogger)` |
+| `WithPanicHandler(handler func(any))` | 设置任务 panic 时的处理函数，用于监控和告警 | `logrus.Errorf` | 见下文示例 |
 
 ### Logger 接口
 
@@ -168,13 +168,25 @@ type Logger interface {
 }
 ```
 
+常见的日志库如 `logrus`、`zap` (通过 adapter) 等都可以使用。
+
+### 选项特性
+
+- **可组合**: 可以同时使用多个选项，顺序不影响结果
+- **可选**: 所有选项都有合理的默认值，可以不提供任何选项
+- **继承性**: 溢出时间轮会自动继承父轮的配置（logger、panic handler、协程池）
+- **线程安全**: 选项应用发生在创建阶段，运行时不可修改
+
 ## 技术实现细节
+
+> 注：文档中的代码行号引用基于 commit `2131f04`，后续代码变更可能导致行号偏移
 
 ### 时间轮参数
 
 - **tick**: 时间槽的时间跨度(毫秒)
 - **wheelSize**: 时间轮的槽位数量
 - **interval**: 一圈的时间跨度 = tick × wheelSize
+- **currentTime**: 时间轮的逻辑时钟，以 tick 为单位推进（原子操作）
 
 ### 分层原理
 
@@ -182,6 +194,7 @@ type Logger interface {
 1. 创建或获取溢出时间轮(tick = interval, wheelSize 保持不变)
 2. 递归将任务插入到溢出轮
 3. 溢出轮的 tick 是当前轮的 interval,形成时间级联
+4. 溢出轮继承父轮的协程池、日志器和 panic 处理器，确保配置一致性
 
 ### Bucket 工作流程
 
